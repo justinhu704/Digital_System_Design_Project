@@ -1,0 +1,41 @@
+LCD correction validation — 2026-11-18 (Asia/Taipei)
+
+Tool: ModelSim Intel FPGA Starter 2020.1
+All five tests passed, compile errors=0, compile warnings=0:
+PASS: sonar core regression
+PASS: top-level integration at 1000000 Hz
+PASS: LCD real-time timing and dirty rows at 1000000 Hz
+PASS: LCD real-time timing and dirty rows at 24000000 Hz
+PASS: LCD real-time timing and dirty rows at 50000000 Hz
+
+Timing tests use physical elapsed simulation time. They cover E setup/high/data
+hold, power-on wait, ordinary/clear command waits, initialization, DDRAM data,
+no unchanged-row writes, one-row updates and changes during transmission.
+The LCD checker is a write-side protocol model, not the VeriInstrument app.
+
+Quartus Prime Lite 25.1 Analysis & Synthesis:
+Target used for syntax/synthesis check: Cyclone V / 5CSEMA5F31C6
+0 errors, 31 warnings; 1755 logic cells; 1 RAM segment, SINGLE_PORT.
+Warnings include intentional width narrowing and M4K-to-available-memory mapping
+for this different device family. No Fitter or timing closure was performed.
+This does NOT establish EP1C6/EP1C12 fitting or physical-board operation.
+
+Only LCD/top integration, tests, scripts and documents were changed.
+The game core and pin assignments were preserved.
+
+
+Formatting: one Tab per indentation level. All code and comment tokens were
+compared with the latest project before formatting and were identical.
+Fast regression re-run after formatting: all three tests passed.
+
+SHA256:
+RTL\sonar_game_core.v  0A7CD50E9C8066635D349440095DE344C9A6B61B7DA6F7371BCDE756BE6F9721
+RTL\sonar_support.v  6D5D70EA051CE1B397B4BF003B4F6A69421C73FD3998E3BA13C3D076A5D6BCBE
+RTL\submarine_sonar_top.v  20A17DE36161277BAB9CA5E1FE117FE03A5DD7A2E06F3479DB7FCAE8C5D32B86
+RTL\text_lcd_driver.v  B940B3649CDA1FAE84CB0EE0C8BBC8C429508759730EDA896A06328F3059944C
+tb\tb_sonar.v  97358D46B1FD618CD569BA1A2796926F55082E007EA6C5043F052B35BE8F28F6
+tb\tb_top.v  3255DD78371DF878C6CB5CD3A69609C9CEE30AFB125019C1ADD7B0A6077277A5
+tb\tb_lcd.v  B53961CF0C79630798F3100198A5F8C39999AAD13DD951220C7E719CA9D7D77E
+Simulation\sim.do  5D31C476B1B82EF2FDB98E361BDAD45DF45E6922FAAF488CBF7E422D734ADE7D
+Simulation\run_sim.ps1  C597EE7FAFA536182BC2184F308F6F3E3360D208E3503C85B9218810A40651CB
+
