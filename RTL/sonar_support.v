@@ -1,29 +1,31 @@
-// 產生固定頻率的掃描、按鈕、動畫時脈訊號
-module sonar_ticks #(parameter CLK_FREQ = 24000000)(input clk, input rst,
+// ??????????????????? (500 Hz ???)
+module sonar_ticks #(parameter CLK_FREQ = 500)(input clk, input rst,
 	output tick_scan, output tick_key, output tick_anim);
-	reg [31:0] cs, ck, ca;
-	localparam SC =(CLK_FREQ / 2000 > 0) ? CLK_FREQ / 2000 : 1;
-	localparam KY =(CLK_FREQ / 100 > 0) ? CLK_FREQ / 100 : 1;
-	localparam AN =(CLK_FREQ / 10 > 0) ? CLK_FREQ / 10 : 1;
-	assign tick_scan = cs == SC - 1;
-	assign tick_key = ck == KY - 1;
-	assign tick_anim = ca == AN - 1;
-	always @(posedge clk) if (rst) begin
-		cs <= 0;
-		ck <= 0;
-		ca <= 0;
-	end
-	else begin
-		cs <= tick_scan ? 0 : cs + 1;
-		ck <= tick_key ? 0 : ck + 1;
-		ca <= tick_anim ? 0 : ca + 1;
+	reg [15:0] cs, ck, ca;
+	localparam SC = (CLK_FREQ / 500 > 0) ? CLK_FREQ / 500 : 1; // 500Hz: every clock
+	localparam KY = (CLK_FREQ / 25 > 0)  ? CLK_FREQ / 25  : 1; // 500Hz: every 20 clocks (40ms)
+	localparam AN = (CLK_FREQ / 10 > 0)  ? CLK_FREQ / 10  : 1; // 500Hz: every 50 clocks (100ms)
+	assign tick_scan = (cs == SC - 1);
+	assign tick_key = (ck == KY - 1);
+	assign tick_anim = (ca == AN - 1);
+	always @(posedge clk) begin
+		if (rst) begin
+			cs <= 0;
+			ck <= 0;
+			ca <= 0;
+		end
+		else begin
+			cs <= tick_scan ? 16'd0 : cs + 16'd1;
+			ck <= tick_key ? 16'd0 : ck + 16'd1;
+			ca <= tick_anim ? 16'd0 : ca + 16'd1;
+		end
 	end
 endmodule
 
-// 按鈕防彈跳
+// ???????? (??? 2 ? 40ms ???? = 80ms ?????????,?????????)
 module btn_debouncer(input clk, input rst, input tick, input raw,
 	output reg level, output reg pressed);
-	reg s1, s2, hist;
+	reg s1, s2, h1, h2;
 	always @(posedge clk) begin
 		s1 <= raw;
 		s2 <= s1;
@@ -31,12 +33,14 @@ module btn_debouncer(input clk, input rst, input tick, input raw,
 		if (rst) begin
 			s1 <= 0;
 			s2 <= 0;
-			hist <= 0;
+			h1 <= 0;
+			h2 <= 0;
 			level <= 0;
 		end
 		else if (tick) begin
-			hist <= s2;
-			if (s2 == hist && s2 != level) begin
+			h1 <= s2;
+			h2 <= h1;
+			if (s2 == h1 && h1 == h2 && s2 != level) begin
 				level <= s2;
 				pressed <= s2;
 			end
@@ -44,60 +48,79 @@ module btn_debouncer(input clk, input rst, input tick, input raw,
 	end
 endmodule
 
-// 4Kx1 RAM for sonar map
-module sonar_map_ram(input clk, input we, input [11:0] addr, input din, output reg dout);
-	(* ramstyle = "M4K" *) reg mem [0:4095];
-	always @(posedge clk) begin
-		if (we) begin
-			mem [addr] <= din;
-			dout <= din;
-		end
-		else dout <= mem [addr];
-	end
-endmodule
-
-// 8x8 LED 矩陣驅動
+// 8x8 LED ???? (Active-Row Skipping:???????,?????????)
 module matrix_8x8_driver #(parameter ROW_INV = 0, COL_INV = 0)
 	(input clk, input rst, input tick, input [63:0] pixels, output [7:0] rows, cols);
 	reg [2:0] row;
 	reg [63:0] frame;
-	always @(posedge clk) if (rst) begin
-		row <= 7;
-		frame <= 0;
+
+	reg [2:0] next_row;
+	integer i;
+	reg found;
+	always @* begin
+		next_row = row + 3'd1;
+		found = 0;
+		for (i = 1; i <= 8; i = i + 1) begin
+			if (!found && (pixels[((row + i[2:0]) * 8) +: 8] != 8'd0)) begin
+				next_row = row + i[2:0];
+				found = 1;
+			end
+		end
 	end
-	else if (tick) begin
-		row <= row + 1'b1;
-		if (row == 7) frame <= pixels;
+
+	always @(posedge clk) begin
+		if (rst) begin
+			row <= 0;
+			frame <= 0;
+		end
+		else if (tick) begin
+			frame <= pixels;
+			row <= next_row;
+		end
 	end
-	assign rows =(8'b1 << row) ^ { 8 { ROW_INV != 0 } };
-	assign cols =(frame >>(row * 8)) ^ { 8 { COL_INV != 0 } };
+
+	wire [7:0] cur_col = frame[row * 8 +: 8];
+	wire [7:0] raw_row = (cur_col == 8'd0) ? 8'd0 : (8'b1 << row);
+	assign rows = raw_row ^ { 8 { ROW_INV != 0 } };
+	assign cols = cur_col ^ { 8 { COL_INV != 0 } };
 endmodule
 
-// 雙位數七段顯示器驅動
+// ?????????? (125 Hz ????)
 module dual_7seg_driver #(parameter SEG_INV = 0, SEL_INV = 0)
 	(input clk, input rst, input tick, input [5:0] value, output [6:0] seg, output [1:0] sel);
-	reg digit;
-	reg [3:0] n;
+	reg [1:0] div_cnt;
+	wire digit = div_cnt[1];
+	reg [3:0] tens, ones;
 	reg [6:0] code;
-	always @(posedge clk) if (rst) digit <= 0;
-	else if (tick) digit <= ~ digit;
-	// seg[0..6] = a,b,c,d,e,f,g. sel[0]=tens, sel[1]=units.
+	always @(posedge clk) begin
+		if (rst) div_cnt <= 0;
+		else if (tick) div_cnt <= div_cnt + 2'd1;
+	end
+
 	always @* begin
-		n = digit ? value % 10 : value / 10;
-		case (n)
-			0 : code = 7'b0111111;
-			1 : code = 7'b0000110;
-			2 : code = 7'b1011011;
-			3 : code = 7'b1001111;
-			4 : code = 7'b1100110;
-			5 : code = 7'b1101101;
-			6 : code = 7'b1111101;
-			7 : code = 7'b0000111;
-			8 : code = 7'b1111111;
-			9 : code = 7'b1101111;
-			default : code = 0;
+		if (value >= 6'd60)      begin tens = 4'd6; ones = value - 6'd60; end
+		else if (value >= 6'd50) begin tens = 4'd5; ones = value - 6'd50; end
+		else if (value >= 6'd40) begin tens = 4'd4; ones = value - 6'd40; end
+		else if (value >= 6'd30) begin tens = 4'd3; ones = value - 6'd30; end
+		else if (value >= 6'd20) begin tens = 4'd2; ones = value - 6'd20; end
+		else if (value >= 6'd10) begin tens = 4'd1; ones = value - 6'd10; end
+		else                     begin tens = 4'd0; ones = value[3:0];  end
+
+		case (digit ? ones : tens)
+			4'd0 : code = 7'b0111111;
+			4'd1 : code = 7'b0000110;
+			4'd2 : code = 7'b1011011;
+			4'd3 : code = 7'b1001111;
+			4'd4 : code = 7'b1100110;
+			4'd5 : code = 7'b1101101;
+			4'd6 : code = 7'b1111101;
+			4'd7 : code = 7'b0000111;
+			4'd8 : code = 7'b1111111;
+			4'd9 : code = 7'b1101111;
+			default : code = 7'b0000000;
 		endcase
 	end
+
 	assign seg = code ^ { 7 { SEG_INV != 0 } };
-	assign sel =(digit ? 2'b10 : 2'b01) ^ { 2 { SEL_INV != 0 } };
+	assign sel = (digit ? 2'b10 : 2'b01) ^ { 2 { SEL_INV != 0 } };
 endmodule
