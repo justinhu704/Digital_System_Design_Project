@@ -12,14 +12,19 @@ module tb_sonar;
 	wire [2:0] state;
 	wire [6:0] distance;
 	wire [63:0] pixels;
+	wire [1:0] drift_dir;
+	wire drift_seen;
 	integer errors = 0, i, j, count, g, d, distinct, rows_not4, period16;
 	integer min_d, max_d, sx, sy, quads, total_mines, min_m, max_m;
 	integer t4, t5, t6, t7, tplus, tdiag, tend;
 	reg [3:0] quad_seen;
 	reg [63:0] r;
 	reg [4095:0] goal_seen;
+	reg [63:0] snap [0:63];
+	integer dd, ox, oy, exp_m, bad, hits, ring_ok, mine_ok;
+	reg [3:0] dirs_seen;
 	sonar_game_core dut(clk, rst, tick, move, sonar, start, torp, hard, drift, demo,
-		x, y, gx, gy, hp, pings, torps, state, warn, busy, hit, distance, pixels);
+		x, y, gx, gy, hp, pings, torps, state, warn, busy, hit, distance, pixels, drift_dir, drift_seen);
 
 	task check;
 		input condition;
@@ -110,8 +115,9 @@ module tb_sonar;
 
 		// ---------- normal game: distance, map quality, safe zones ----------
 		newgame;
-		d = absd(gx, sx) + absd(gy, sy);
+		d = absd(gx, sx) + absd(gy, sy) - 1;      // to the nearest cell of the goal cross
 		check(d >= 24 && d <= 48, "normal start-goal distance 24..48");
+		check(distance == d, "distance output counts to the nearest cross cell");
 		check(sx >= 3 && sx <= 60 && sy >= 3 && sy <= 60, "start inside 3..60");
 		check(gx >= 3 && gx <= 60 && gy >= 3 && gy <= 60, "goal inside 3..60");
 		for (j = 0; j < 64; j = j + 1)
@@ -121,8 +127,8 @@ module tb_sonar;
 		check(count > 160 && count < 360, "normal mine density about 1/16");
 		for (i = sx - 2; i <= sx + 2; i = i + 1) for (j = sy - 2; j <= sy + 2; j = j + 1)
 			check(dut.map_ram.mem[j][i] == 0, "start 5x5 safe zone");
-		for (i = gx - 3; i <= gx + 3; i = i + 1) for (j = gy - 3; j <= gy + 3; j = j + 1)
-			check(dut.map_ram.mem[j][i] == 0, "goal 7x7 safe zone");
+		for (i = gx - 2; i <= gx + 2; i = i + 1) for (j = gy - 2; j <= gy + 2; j = j + 1)
+			check(dut.map_ram.mem[j][i] == 0, "goal 5x5 safe zone");
 		// Old hash defect: exactly 4 mines per row repeating every 16 columns.
 		rows_not4 = 0;
 		period16 = 0;
@@ -169,7 +175,7 @@ module tb_sonar;
 		cycles(1);
 		check(pings == 8, "busy sonar not charged");
 		repeat (12) anim;
-		check(dut.ripple == 0 && dut.reveal_ticks == 15, "ripple enters reveal");
+		check(dut.ripple == 0 && dut.reveal_ticks == 10, "ripple enters 2 s reveal");
 		dut.map_ram.mem[sy - 1][sx + 1] = 1;      // view (4,4) = pixel 36
 		cycles(200);
 		check(pixels[36] == 1, "reveal shows mine");
@@ -213,7 +219,7 @@ module tb_sonar;
 		hard = 1;
 		newgame;
 		check(hp == 8 && pings == 9 && torps == 3, "hard restart resources, 3 torpedoes");
-		d = absd(gx, sx) + absd(gy, sy);
+		d = absd(gx, sx) + absd(gy, sy) - 1;
 		check(d >= 64, "hard start-goal distance >= 64");
 		count_mines;
 		$display("INFO: hard map mines = %0d / 4096", count);
@@ -235,16 +241,64 @@ module tb_sonar;
 		dut.goal_x = 63;
 		dut.goal_y = 63;
 		cycles(2);
-		check(distance == 126, "full-width Manhattan distance");
+		check(distance == 125, "full-width distance to the nearest cross cell");
 
-		// ---------- current never mines the submarine cell ----------
-		dut.target_x = 0;
-		dut.target_y = 0;
-		dut.access_row = 0;
-		dut.op = 3;
-		dut.job = 3;
-		cycles(2);
-		check(dut.map_ram.mem[0][0] == 0, "current protects submarine cell");
+		// ---------- current: the whole minefield shifts one cell ----------
+		// Mines are planted on all four neighbours, so whatever the direction one is pushed onto the submarine.
+		dut.goal_x = 40;
+		dut.goal_y = 40;
+		place(20, 20, 0);
+		dirs_seen = 0;
+		check(!drift_seen, "no current direction before the first shift");
+		for (g = 0; g < 40 && dirs_seen != 4'hF; g = g + 1) begin
+			dut.hp = 8;
+			dut.map_ram.mem[19][20] = 1;
+			dut.map_ram.mem[21][20] = 1;
+			dut.map_ram.mem[20][19] = 1;
+			dut.map_ram.mem[20][21] = 1;
+			for (j = 0; j < 64; j = j + 1) snap[j] = dut.map_ram.mem[j];
+			dut.pending_drift = 1;
+			i = 0;
+			while (!dut.drift_busy && i < 50) begin
+				cycles(1);
+				i = i + 1;
+			end
+			i = 0;
+			while (dut.drift_busy && i < 400) begin
+				cycles(1);
+				i = i + 1;
+			end
+			if (g == 0) $display("INFO: current shift took %0d clocks", i);
+			check(i > 120 && i < 140, "map shift takes about 128 clocks");
+			dd = drift_dir;
+			dirs_seen[dd] = 1'b1;
+			bad = 0;
+			hits = 0;
+			for (oy = 0; oy < 64; oy = oy + 1)
+				for (ox = 0; ox < 64; ox = ox + 1) begin
+					sx = ox + (dd == 2 ? 1 : dd == 3 ? -1 : 0);      // source cell of (ox, oy)
+					sy = oy + (dd == 0 ? 1 : dd == 1 ? -1 : 0);
+					if (sx >= 0 && sx < 64 && sy >= 0 && sy < 64) begin
+						exp_m = snap[sy][sx];
+						if (absd(ox, 40) <= 2 && absd(oy, 40) <= 2) exp_m = 0;    // goal zone stays clear
+						if (ox == 20 && oy == 20) begin
+							hits = exp_m;
+							exp_m = 0;                                        // the mine exploded on the hull
+						end
+						if (dut.map_ram.mem[oy][ox] !== exp_m) bad = bad + 1;
+					end
+					else if (absd(ox, 40) <= 2 && absd(oy, 40) <= 2 && dut.map_ram.mem[oy][ox] !== 1'b0)
+						bad = bad + 1;
+				end
+			check(bad == 0, "every mine moved one cell in the current direction");
+			check(hits == 1 && hp == 7 && hit, "mine pushed onto the submarine costs one HP");
+			check(x == 20 && y == 20, "submarine itself does not move");
+			check(drift_seen, "current direction reported");
+			repeat (10) anim;
+		end
+		$display("INFO: current directions seen N/S/W/E = %b", { dirs_seen[0], dirs_seen[1], dirs_seen[2], dirs_seen[3] });
+		check(dirs_seen == 4'hF, "current shifts in all four directions");
+		dut.hp = 8;
 
 		// ---------- straight-flying torpedo ----------
 		dut.torpedoes = 6;
@@ -308,12 +362,26 @@ module tb_sonar;
 		dut.sub_y = 20;
 		dut.goal_x = 22;
 		dut.goal_y = 20;
+		dut.hp = 8;
+		dut.map_ram.mem[20][20] = 0;
 		dut.map_ram.mem[20][21] = 0;
+		dut.map_ram.mem[24][18] = 1;              // after the win: view (0,7) = pixel 56, ring distance 7
 		go(8);
 		check(state == 3, "touching goal plus arm wins");
-		check(pixels == 64'hff818181818181ff, "win first frame");
-		repeat (6) anim;
-		check(pixels == 64'hffffffffffffffff, "win fills center");
+		check(pixels[56] && pixels[20] && pixels[28] && pixels[29] && pixels[36], "win screen shows mines and goal");
+		ring_ok = 1;
+		mine_ok = 1;
+		for (i = 0; i < 60; i = i + 1) begin
+			anim;
+			cycles(80);                            // let the viewport redraw
+			if (dut.win_r == 8 && !pixels[63]) ring_ok = 0;      // ring reaches the far corner (7,7) first
+			if (dut.win_r == 4 && !(pixels[9] && pixels[16] && pixels[31] && pixels[59] && !pixels[63])) ring_ok = 0;   // ring cells (1,1) (0,2) (7,3) (3,7)
+			if (dut.win_r > 7 && !pixels[56]) mine_ok = 0;       // still inside the ring
+			if (dut.win_r < 7 && pixels[56]) mine_ok = 0;        // swept away
+		end
+		check(ring_ok, "win ring shrinks from the corners to the submarine");
+		check(mine_ok, "mines vanish when the ring passes them");
+		check(dut.win_r == 0 && pixels == 64'h0000001038100000, "win screen ends with only goal and submarine");
 
 		// ---------- randomness: 40 games per difficulty ----------
 		for (g = 0; g < 2; g = g + 1) begin
@@ -329,7 +397,7 @@ module tb_sonar;
 			for (j = 0; j < 40; j = j + 1) begin
 				cycles(1 + (j * 37) % 23);   // players press Start at different times
 				newgame;
-				d = absd(gx, sx) + absd(gy, sy);
+				d = absd(gx, sx) + absd(gy, sy) - 1;
 				if (d < min_d) min_d = d;
 				if (d > max_d) max_d = d;
 				check(gx >= 3 && gx <= 60 && gy >= 3 && gy <= 60, "random goal bounds");

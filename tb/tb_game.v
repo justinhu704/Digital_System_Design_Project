@@ -189,9 +189,19 @@ module tb_game;
 		input integer hp, pings, ready;
 		play_line1 = { "HP:", dch(hp), " SON:", dch(pings), " T:", dch(ready), "  " };
 	endfunction
+	// DIST counts to the nearest cell of the goal cross; with the current switch ON the
+	// last shift direction follows (N/S/W/E, '-' before the first shift)
 	function [127:0] play_line2;
 		input integer d;
-		play_line2 = { "DIST:", dch(d / 100), dch((d / 10) % 10), dch(d % 10), "        " };
+		input cur_on;
+		input [7:0] cur;
+		play_line2 = { "DIST:", dch(d / 100), dch((d / 10) % 10), dch(d % 10),
+		               cur_on ? { " CUR:", cur, "  " } : "        " };
+	endfunction
+	function [7:0] cur_letter;
+		input dummy;
+		cur_letter = !dut.core.drift_seen ? "-" : dut.core.drift_dir == 0 ? "N" :
+		             dut.core.drift_dir == 1 ? "S" : dut.core.drift_dir == 2 ? "W" : "E";
 	endfunction
 
 	function integer hp_leds_lit;
@@ -297,7 +307,8 @@ module tb_game;
 			check(warn_seen == expect_warn(px, py), "yellow warning LED");
 			check(green_seen == (!expect_warn(px, py) && !dut.core.hit_active), "green safe LED");
 			check_lcd(play_line1(dut.core.hp, dut.core.pings, dut.core.torpedoes),
-				expect_warn(px, py) ? "WARN: MINE NEAR!" : play_line2(absd(px, gx) + absd(py, gy)));
+				expect_warn(px, py) ? "WARN: MINE NEAR!" :
+				play_line2(absd(px, gx) + absd(py, gy) - 1, dut.drift_sw, cur_letter(0)));
 		end
 	endtask
 
@@ -399,7 +410,7 @@ module tb_game;
 	// ------------------------------------------------------------------
 	// Scenario
 	// ------------------------------------------------------------------
-	integer drift_changes, drift_bad, mines_now;
+	integer drift_bad, hits, hp_before, dd, ox, oy, exp_m, t_shift, t_first, shift_i;   // shift_i: k is shared with the pin decoders
 	reg [63:0] snap [0:63];
 	initial begin
 		log = $fopen("game_log.txt", "w");
@@ -433,7 +444,7 @@ module tb_game;
 		sy = dut.core.sub_y;
 		gx = dut.core.goal_x;
 		gy = dut.core.goal_y;
-		n = absd(sx, gx) + absd(sy, gy);
+		n = absd(sx, gx) + absd(sy, gy) - 1;      // to the nearest cell of the goal cross
 		$fdisplay(log, "");
 		note("GAME 1 (normal) started");
 		$fdisplay(log, "   start (%0d,%0d)  goal (%0d,%0d)  distance %0d", sx, sy, gx, gy, n);
@@ -500,17 +511,27 @@ module tb_game;
 		autopilot(1);
 		check(dut.core.state == 3, "game 1 reaches goal");
 		if (dut.core.state == 3) games_won = games_won + 1;
+		// Win screen: all mines in view first, then the ring sweeps them away
+		px = dut.core.sub_x;
+		py = dut.core.sub_y;
+		grab_matrix(frame);
+		check(frame === render(px, py, 1), "win screen shows every mine in view");
+		$fdisplay(log, "   matrix right after the win (all mines in view):");
+		show_frame(frame);
 		dump_map;
 		$fdisplay(log, "   autopilot steps: %0d", steps);
 		check_lcd("MISSION CLEAR!! ", "PRESS GO RESTART");
-		grab_matrix(frame);
 		check(outputs[49] && !outputs[51], "green LED on after win");
 		check(outputs[48:45] == 0, "compass off after win");
-		note("GAME 1 cleared: LCD MISSION CLEAR, green LED, win animation");
+		wait_ms(3000);
+		grab_matrix(frame);
+		check(frame === render(px, py, 0), "win ring has swept all mines away");
+		$fdisplay(log, "   matrix after the win sweep:");
+		show_frame(frame);
+		note("GAME 1 cleared: LCD MISSION CLEAR, green LED, win screen shows mines then sweeps them away");
 
-		// ================= GAME 2: hard + current =================
+		// ================= GAME 2: hard (current tested separately below) =================
 		switch(6, 1);
-		switch(7, 1);
 		press(5, HOLD / MS);
 		wait_ms(200);
 		check(dut.core.state == 2 && dut.core.hard, "hard game started");
@@ -518,9 +539,9 @@ module tb_game;
 		sy = dut.core.sub_y;
 		gx = dut.core.goal_x;
 		gy = dut.core.goal_y;
-		n = absd(sx, gx) + absd(sy, gy);
+		n = absd(sx, gx) + absd(sy, gy) - 1;      // to the nearest cell of the goal cross
 		$fdisplay(log, "");
-		note("GAME 2 (hard, current ON) started");
+		note("GAME 2 (hard) started");
 		$fdisplay(log, "   start (%0d,%0d)  goal (%0d,%0d)  distance %0d", sx, sy, gx, gy, n);
 		$display("   start (%0d,%0d)  goal (%0d,%0d)  distance %0d", sx, sy, gx, gy, n);
 		check(n >= 64, "hard distance range");
@@ -553,23 +574,50 @@ module tb_game;
 		check_displays(0);
 		note("torpedo: 3 in hard mode, held button fires once, flies to next mine; Demo switch shows mines");
 
-		// ---- Current: watch 11 s without moving ----
-		for (j = 0; j < 64; j = j + 1) snap[j] = dut.core.map_ram.mem[j];
-		wait_ms(11000);
-		drift_changes = 0;
-		drift_bad = 0;
-		for (j = 0; j < 64; j = j + 1)
-			for (i = 0; i < 64; i = i + 1)
-				if (snap[j][i] != dut.core.map_ram.mem[j][i]) begin
-					drift_changes = drift_changes + 1;
-					if ((absd(i, sx) <= 2 && absd(j, sy) <= 2) || (absd(i, gx) <= 3 && absd(j, gy) <= 3))
-						drift_bad = drift_bad + 1;
+		// ---- Current: switch ON, wait for two map shifts without moving ----
+		switch(7, 1);
+		wait_ms(150);
+		check_displays(0);                        // LCD line 2 shows CUR:- before the first shift
+		for (shift_i = 0; shift_i < 2; shift_i = shift_i + 1) begin
+			px = dut.core.sub_x;
+			py = dut.core.sub_y;
+			hp_before = dut.core.hp;
+			for (j = 0; j < 64; j = j + 1) snap[j] = dut.core.map_ram.mem[j];
+			wait(dut.core.drift_busy);
+			t_shift = $time / MS;
+			if (shift_i == 1) begin
+				$fdisplay(log, "   second shift %0d ms after the first", t_shift - t_first);
+				check(t_shift - t_first >= 4950 && t_shift - t_first <= 5050, "current shifts the map every 5 s");
+			end
+			t_first = t_shift;
+			wait(!dut.core.drift_busy);
+			dd = dut.core.drift_dir;
+			drift_bad = 0;
+			hits = 0;
+			for (j = 0; j < 64; j = j + 1)
+				for (i = 0; i < 64; i = i + 1) begin
+					ox = i + (dd == 2 ? 1 : dd == 3 ? -1 : 0);
+					oy = j + (dd == 0 ? 1 : dd == 1 ? -1 : 0);
+					if (ox >= 0 && ox < 64 && oy >= 0 && oy < 64) begin
+						exp_m = snap[oy][ox];
+						if (absd(i, gx) <= 2 && absd(j, gy) <= 2) exp_m = 0;
+						if (i == px && j == py) begin
+							hits = exp_m;
+							exp_m = 0;
+						end
+						if (dut.core.map_ram.mem[j][i] !== exp_m) drift_bad = drift_bad + 1;
+					end
 				end
-		$fdisplay(log, "   current changed %0d cell(s) in 11 s", drift_changes);
-		// One flip every 5 s: an 11 s window holds 2 or 3 events (a flip may be skipped in a safe zone)
-		check(drift_changes >= 1 && drift_changes <= 3, "current flips about one cell per 5 s");
-		check(drift_bad == 0, "current never touches safe zones");
-		note("current OK");
+			$fdisplay(log, "   current shift %0d: direction %s, %0d mine(s) pushed onto the submarine",
+				shift_i + 1, cur_letter(0), hits);
+			check(drift_bad == 0, "current shifts every mine one cell");
+			check(dut.core.sub_x == px && dut.core.sub_y == py, "submarine stays put in the current");
+			check(dut.core.hp == hp_before - hits, "mine pushed onto the submarine costs one HP");
+			wait_ms(600);                         // let a hit animation finish
+			check_displays(0);                    // LCD line 2 shows the direction, matrix the shifted map
+		end
+		switch(7, 0);
+		note("current: map shifts one cell every 5 s, LCD shows the direction");
 
 		autopilot(5);
 		check(dut.core.state == 3, "game 2 reaches goal");

@@ -45,11 +45,13 @@ module submarine_sonar_top #(
 	wire [2:0] game_state;
 	wire [6:0] goal_dist;
 	wire [63:0] pixels;
+	wire [1:0] drift_dir;
+	wire drift_seen;
 
 	sonar_game_core core(
 		clk, rst, anim_tick, movement, press[4], press[5], torp_fire,
 		diff_sw, drift_sw, demo_sw, x, y, gx, gy, hp, pings, torps, game_state, warn,
-		sonar_busy, hit, goal_dist, pixels
+		sonar_busy, hit, goal_dist, pixels, drift_dir, drift_seen
 	);
 
 	matrix_8x8_driver #(MAT_ROW_INV, MAT_COL_INV) mat(clk, rst, scan_tick, pixels, outputs[7:0], outputs[15:8]);
@@ -90,11 +92,24 @@ module submarine_sonar_top #(
 		dist_ones = ones7[3:0];
 	end
 
+	// Current direction letter for the LCD ('-' until the first shift of this game)
+	reg [7:0] cur_char;
+	always @* begin
+		if (!drift_seen) cur_char = "-";
+		else case (drift_dir)
+			2'd0 : cur_char = "N";
+			2'd1 : cur_char = "S";
+			2'd2 : cur_char = "W";
+			default : cur_char = "E";
+		endcase
+	end
+
 	// Two 16-character LCD lines (ASCII, leftmost character in the MSBs)
 	reg [127:0] line1, line2;
 	always @* begin
 		line1 = { "HP:", (8'd48 + { 4'b0, hp }), " SON:", (8'd48 + { 4'b0, pings }), " T:", (8'd48 + { 5'b0, torps }), "  " };
-		line2 = { "DIST:", (dist_ge100 ? 8'h31 : 8'h30), (8'd48 + { 4'b0, dist_tens }), (8'd48 + { 4'b0, dist_ones }), "        " };
+		line2 = { "DIST:", (dist_ge100 ? 8'h31 : 8'h30), (8'd48 + { 4'b0, dist_tens }), (8'd48 + { 4'b0, dist_ones }),
+		          (drift_sw ? { " CUR:", cur_char, "  " } : "        ") };
 		case (game_state)
 			0 : begin
 				// Idle screen shows the live difficulty / current switches (handy for checking polarity)
