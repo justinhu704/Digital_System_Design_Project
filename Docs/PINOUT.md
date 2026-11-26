@@ -8,7 +8,7 @@
 
 | Quartus Node Name | Location | 接到什麼 |
 |---|---|---|
-| clk | PIN_28 | VeriLite 系統時脈；頻率須確認 |
+| clk | PIN_28 | VeriComm 送入的主時脈，預設 500 Hz（須與 `CLK_FREQ` 一致） |
 | led_board[0] | PIN_122 | D0，HP 第1格 |
 | led_board[1] | PIN_123 | D1，HP 第2格 |
 | led_board[2] | PIN_124 | D2，HP 第3格 |
@@ -30,16 +30,22 @@
 | inputs[3] | Push Button 右 | PIN_223 | High active，X+1 |
 | inputs[4] | Push Button LA 聲納 | PIN_222 | Low active，按下發射 |
 | inputs[5] | Push Button LA 開始 | PIN_219 | Low active，開始／結算重開 |
-| inputs[6] | 藍 Switch 難度 | PIN_218 | 0普通、1困難；開始時鎖定 |
-| inputs[7] | 藍 Switch 洋流 | PIN_217 | 1啟用 |
-| inputs[8] | 藍 Switch 連走 | PIN_216 | 1啟用 |
-| inputs[9] | Switch Red 魚雷 | PIN_77 | OFF→ON 發射一次 |
-| inputs[10] | Switch Red Demo | PIN_78 | 1顯示視窗全部水雷 |
-| inputs[11] | Rotary Push Button Phase A | PIN_79 | A/B順序待確認 |
-| inputs[12] | Rotary Push Button Phase B | PIN_82 | A/B順序待確認 |
-| inputs[13] | Rotary Push Button Center Push | PIN_83 | 保留，未使用 |
+| inputs[6] | 藍 Switch 難度 | PIN_218 | OFF普通、ON困難；開始時鎖定（決定終點距離與水雷密度） |
+| inputs[7] | 藍 Switch 洋流 | PIN_217 | ON啟用 |
+| inputs[8] | （未使用） | PIN_216 | 空出，可不接 |
+| inputs[9] | Push Button LA 魚雷 | PIN_77 | Low active，按一下發射一次（按住不連發） |
+| inputs[10] | Switch Red Demo | PIN_78 | ON顯示視窗全部水雷 |
+| inputs[11] | （未使用） | PIN_79 | 空出，可不接（原旋鈕 A） |
+| inputs[12] | （未使用） | PIN_82 | 空出，可不接（原旋鈕 B） |
+| inputs[13] | （未使用） | PIN_83 | 空出，可不接（原旋鈕按壓） |
 
-input4、input5 在未按下時應為 1。其餘按鍵未按下時為 0。不要把 LA 再額外反相。
+input4、input5、input9 在未按下時應為 1，其餘按鈕未按下時為 0。不要把 LA 再額外反相。
+
+魚雷已從開關改成按鈕，預設 `TORP_LOW_ACTIVE = 1`，跟聲納、開始一樣是 Low active 的 LA 按鈕（未按下為 1）。若改用 High active 的按鈕元件，把這個參數改成 0。
+
+開關（input6、7、10）預設 `SW_INV = 1`，也就是程式假設開關撥 ON 時腳位讀到 0。上板後在待機畫面撥難度、洋流開關，LCD 第一行應依序顯示 `LV:HARD`、`CUR:ON`；若顯示相反，把頂層參數 `SW_INV` 改成 0。
+
+終點位置已改為每局隨機，不再使用旋鈕選區，所以 input8、input11～13 都空出來了。
 
 ## 矩陣與 LCD
 
@@ -55,7 +61,7 @@ input4、input5 在未按下時應為 1。其餘按鍵未按下時為 0。不要
 
 預設 Row/Col 都是 high active。`pixels[y*8+x]` 對應 Row=y、Col=x。若矩陣全暗／反亮，先依模擬元件規格調整 MAT_ROW_INV、MAT_COL_INV；上下左右是否反轉也需現場確認。
 
-LCD 請使用講義的 Text LCD Display (2×16, High Active)。RST 接 output52，原本的魚雷 LED 改由 LCD 第一行 T:1／T:0 顯示。
+LCD 請使用講義的 Text LCD Display (2×16, High Active)。RST 接 output52，原本的魚雷 LED 改由 LCD 第一行 `T:n`（剩餘發數）顯示。
 
 ## 雙位七段座標
 
@@ -68,7 +74,7 @@ LCD 請使用講義的 Text LCD Display (2×16, High Active)。RST 接 output52�
 | outputs[43] | PIN_73 | Y SEL0，十位 |
 | outputs[44] | PIN_2 | Y SEL1，個位 |
 
-使用兩個 Seven Segment Select Mode 元件，不接 dp。預設段碼、選位 high active；SEG_INV 只反相 a..g，SEL_INV 只反相選位。
+使用兩個 Seven Segment Select Mode 元件，不接 dp。段碼 a..g 為 high active（`SEG_INV = 0`）；選位預設 `SEL_INV = 1`，也就是 **low active**（亮哪一位，該 SEL 腳就輸出 0）。SEG_INV 只反相 a..g，SEL_INV 只反相選位。
 
 ## 羅盤與狀態指示燈
 
@@ -83,4 +89,4 @@ LCD 請使用講義的 Text LCD Display (2×16, High Active)。RST 接 output52�
 | outputs[51] | PIN_74 | Red LED：撞擊閃爍或失敗恆亮 |
 | outputs[53] | PIN_76 | LED：聲納掃描／曝光進行中 |
 
-這些虛擬 LED 預設 high active。總共使用54個虛擬輸出、14個虛擬輸入，另有8個板載LED與主時脈。
+這些虛擬 LED 預設 high active。總共使用 54 個虛擬輸出與 10 個虛擬輸入（input0～7、9、10；input8、11～13 空出），另有 8 個板載 LED 與主時脈。

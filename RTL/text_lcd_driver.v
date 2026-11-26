@@ -1,9 +1,10 @@
-// VeriInstrument LCDM: Fast 2-clock-per-char writes on EN falling edges.
-module text_lcd_driver #(
-	parameter CLK_FREQ = 100,
-	parameter POWER_ON_US = 10, SETUP_US = 10, ENABLE_US = 10,
-	parameter COMMAND_US = 10, CLEAR_US = 10, POLL_US = 10
-	)(input clk, input rst, input [255:0] line1, line2,
+// Driver for the VeriInstrument Text LCD Display (2x16, high active, Lecture 9).
+// Each character takes 2 clocks: S_HIGH drives data and raises EN, S_LOW drops EN (falling edge writes).
+// The screen is redrawn only when the text changes: RST is pulsed high for one clock
+// (clear + home), then 32 characters are sent (the LCD wraps to line 2 after 16).
+// Intended for a slow clock such as 500 Hz; EN would be far too short for a real LCD at MHz clocks.
+// If the text changes mid-batch, the newest text is sent right after the batch finishes.
+module text_lcd_driver(input clk, input rst, input [127:0] line1, line2,
 	output reg [7:0] db, output reg rs, output rw, output reg en, output reg lcd_rst);
 
 	localparam [2:0] S_BOOT = 0, S_POLL = 1, S_RESET = 2, S_HIGH = 3, S_LOW = 4;
@@ -14,9 +15,10 @@ module text_lcd_driver #(
 	reg [127:0] saved1, saved2;
 	reg [255:0] shift_buf;
 
-	wire changed = !valid || (line1[255:128] != saved1) || (line2[255:128] != saved2);
+	wire changed = !valid || (line1 != saved1) || (line2 != saved2);
 	assign rw = 1'b0;
 
+	// Course character table: code = ASCII - 0x20 (space -> 0x00, '0' -> 0x10, 'A' -> 0x21)
 	function [7:0] lcd_code;
 		input [7:0] ascii;
 		begin
@@ -44,9 +46,10 @@ module text_lcd_driver #(
 			case (state)
 				S_BOOT, S_POLL: begin
 					if (changed) begin
-						saved1 <= line1[255:128];
-						saved2 <= line2[255:128];
-						shift_buf <= { line1[255:128], line2[255:128] };
+						// Snapshot a whole batch; changes during transmission go to the next batch
+						saved1 <= line1;
+						saved2 <= line2;
+						shift_buf <= { line1, line2 };
 						valid <= 1;
 						byte_index <= 6'd1;
 						lcd_rst <= 1;
@@ -64,7 +67,6 @@ module text_lcd_driver #(
 					state <= S_HIGH;
 				end
 				S_HIGH: begin
-					// Present data & raise EN=1 simultaneously
 					rs <= 1'b1;
 					en <= 1'b1;
 					db <= lcd_code(shift_buf[255:248]);
@@ -72,11 +74,9 @@ module text_lcd_driver #(
 					state <= S_LOW;
 				end
 				S_LOW: begin
-					// Falling edge of EN latches character into LCDM
 					en <= 0;
-					if (byte_index == 6'd32) begin
+					if (byte_index == 6'd32)
 						state <= S_POLL;
-					end
 					else begin
 						byte_index <= byte_index + 6'd1;
 						state <= S_HIGH;

@@ -1,4 +1,4 @@
-// ??????????????????? (500 Hz ???)
+// Derive scan (500 Hz), key-sample (25 Hz) and animation (10 Hz) ticks from the main clock
 module sonar_ticks #(parameter CLK_FREQ = 500)(input clk, input rst,
 	output tick_scan, output tick_key, output tick_anim);
 	reg [15:0] cs, ck, ca;
@@ -22,7 +22,8 @@ module sonar_ticks #(parameter CLK_FREQ = 500)(input clk, input rst,
 	end
 endmodule
 
-// ???????? (??? 2 ? 40ms ???? = 80ms ?????????,?????????)
+// Button debouncer: sampled every 40 ms; level changes only after 3 equal samples
+// (hold a button for about 80-120 ms). pressed pulses for one clock on 0 -> 1.
 module btn_debouncer(input clk, input rst, input tick, input raw,
 	output reg level, output reg pressed);
 	reg s1, s2, h1, h2;
@@ -48,21 +49,23 @@ module btn_debouncer(input clk, input rst, input tick, input raw,
 	end
 endmodule
 
-// 8x8 LED ???? (Active-Row Skipping:???????,?????????)
+// 8x8 LED matrix scanner with active-row skipping (dark rows are skipped).
+// pixels[y*8+x] -> Row=y, Col=x. With all 8 rows lit, each row refreshes at scan rate / 8.
 module matrix_8x8_driver #(parameter ROW_INV = 0, COL_INV = 0)
 	(input clk, input rst, input tick, input [63:0] pixels, output [7:0] rows, cols);
 	reg [2:0] row;
 	reg [63:0] frame;
 
-	reg [2:0] next_row;
+	reg [2:0] next_row, cand;
 	integer i;
 	reg found;
 	always @* begin
 		next_row = row + 3'd1;
 		found = 0;
 		for (i = 1; i <= 8; i = i + 1) begin
-			if (!found && (pixels[((row + i[2:0]) * 8) +: 8] != 8'd0)) begin
-				next_row = row + i[2:0];
+			cand = row + i[2:0];            // 3-bit sum wraps 7 -> 0 (must not be widened)
+			if (!found && (pixels[cand * 8 +: 8] != 8'd0)) begin
+				next_row = cand;
 				found = 1;
 			end
 		end
@@ -85,12 +88,14 @@ module matrix_8x8_driver #(parameter ROW_INV = 0, COL_INV = 0)
 	assign cols = cur_col ^ { 8 { COL_INV != 0 } };
 endmodule
 
-// ?????????? (125 Hz ????)
+// Two-digit 7-segment driver: tens and ones alternate every 2 scan ticks (125 Hz at 500 Hz).
+// seg[0..6] = a..g; sel[0] = tens, sel[1] = ones. SEL_INV inverts only the selects.
 module dual_7seg_driver #(parameter SEG_INV = 0, SEL_INV = 0)
 	(input clk, input rst, input tick, input [5:0] value, output [6:0] seg, output [1:0] sel);
 	reg [1:0] div_cnt;
 	wire digit = div_cnt[1];
 	reg [3:0] tens, ones;
+	reg [5:0] ones6;
 	reg [6:0] code;
 	always @(posedge clk) begin
 		if (rst) div_cnt <= 0;
@@ -98,13 +103,14 @@ module dual_7seg_driver #(parameter SEG_INV = 0, SEL_INV = 0)
 	end
 
 	always @* begin
-		if (value >= 6'd60)      begin tens = 4'd6; ones = value - 6'd60; end
-		else if (value >= 6'd50) begin tens = 4'd5; ones = value - 6'd50; end
-		else if (value >= 6'd40) begin tens = 4'd4; ones = value - 6'd40; end
-		else if (value >= 6'd30) begin tens = 4'd3; ones = value - 6'd30; end
-		else if (value >= 6'd20) begin tens = 4'd2; ones = value - 6'd20; end
-		else if (value >= 6'd10) begin tens = 4'd1; ones = value - 6'd10; end
-		else                     begin tens = 4'd0; ones = value[3:0];  end
+		if (value >= 6'd60)      begin tens = 4'd6; ones6 = value - 6'd60; end
+		else if (value >= 6'd50) begin tens = 4'd5; ones6 = value - 6'd50; end
+		else if (value >= 6'd40) begin tens = 4'd4; ones6 = value - 6'd40; end
+		else if (value >= 6'd30) begin tens = 4'd3; ones6 = value - 6'd30; end
+		else if (value >= 6'd20) begin tens = 4'd2; ones6 = value - 6'd20; end
+		else if (value >= 6'd10) begin tens = 4'd1; ones6 = value - 6'd10; end
+		else                     begin tens = 4'd0; ones6 = value;          end
+		ones = ones6[3:0];
 
 		case (digit ? ones : tens)
 			4'd0 : code = 7'b0111111;

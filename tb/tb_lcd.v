@@ -1,27 +1,26 @@
-`timescale 1ns/1fs
-// Independent write-side LCD checker: no internal DUT state is inspected.
+`timescale 1us/1ns
+// Write-side LCD checker at the real 500 Hz clock. Only the LCD pins are observed:
+// a model of the VeriInstrument LCD (clear on RST, write on EN falling edge) rebuilds the screen.
 module tb_lcd;
-	parameter TEST_CLK_FREQ = 24000000;
-	localparam real HALF_PERIOD_NS = 500000000.0 / TEST_CLK_FREQ;
+	parameter TEST_CLK_FREQ = 500;
+	localparam real HALF_PERIOD_US = 500000.0 / TEST_CLK_FREQ;
 	reg clk = 0;
-	always #(HALF_PERIOD_NS) clk = ~ clk;
+	always #(HALF_PERIOD_US) clk = ~clk;
 	reg rst = 1;
-	reg [255:0] line1 = { "HP:8 SON:9      ", 128'b0 };
-	reg [255:0] line2 = { "DIST:080        ", 128'b0 };
+	reg [127:0] line1 = "HP:8 SON:9 T:1  ";
+	reg [127:0] line2 = "DIST:040        ";
 	wire [7:0] db;
 	wire rs, rw, en, lcd_rst;
-	integer errors = 0, reset_count = 0, command_count = 0, data_count = 0, addr = 0, i, before_count;
+	integer errors = 0, reset_count = 0, data_count = 0, addr = 0, i, before_count, batch_start;
 	reg [7:0] ddram [0:31];
-	reg [7:0] held_db;
-	reg held_rs;
-	realtime released = 0, rise_time = 0, last_fall = 0, changed_time = 0, busy_until = 0, reset_rise = 0;
-	text_lcd_driver #(.CLK_FREQ(TEST_CLK_FREQ)) dut(clk, rst, line1, line2, db, rs, rw, en, lcd_rst);
+	text_lcd_driver dut(clk, rst, line1, line2, db, rs, rw, en, lcd_rst);
+
 	task check;
 		input condition;
 		input [511:0] message;
 		begin
 			if (condition !== 1'b1) begin
-				$display("FAIL at %0t: %0s", $time, message);
+				$display("FAIL at %0t us: %0s", $time, message);
 				errors = errors + 1;
 			end
 		end
@@ -30,85 +29,66 @@ module tb_lcd;
 		input [127:0] a, b;
 		begin
 			for (i = 0; i < 16; i = i + 1) begin
-				check(ddram [i] === a [127 - 8 * i -: 8], "row 1 DDRAM contents");
-				check(ddram [16 + i] === b [127 - 8 * i -: 8], "row 2 DDRAM contents");
+				check(ddram[i] === a[127 - 8 * i -: 8], "row 1 DDRAM contents");
+				check(ddram[16 + i] === b[127 - 8 * i -: 8], "row 2 DDRAM contents");
 			end
 		end
 	endtask
-	always @(db or rs) begin
-		if (! rst) begin
-			check(en !== 1'b1, "data and RS stable while E high");
-			if (last_fall > 0) check($realtime - last_fall >= 999, "data hold >= 1 us");
-		end
-		changed_time = $realtime;
+	// Data may change together with the EN rising edge, but must then stay stable until EN falls
+	reg [8:0] held;
+	always @(posedge en) if (!rst) begin
+		check(rw === 0 && lcd_rst === 0, "write with RW and RST low");
+		#1 held = { rs, db };
 	end
-	always @(posedge en) if (! rst) begin
-		check(rw === 0 && lcd_rst === 0, "write with RW and LCD reset low");
-		check($realtime - changed_time >= 999999, "configured setup >= 1 ms");
-		check($realtime >= busy_until - 1, "no command while LCD busy");
-		check($realtime - released >= 40000000, "power-on wait >= 40 ms");
-		held_db = db;
-		held_rs = rs;
-		rise_time = $realtime;
+	always @(negedge en) if (!rst) begin
+		check({ rs, db } === held, "data and RS stable while EN high");
+		check(rs === 1, "only character writes");
+		check(addr < 32, "at most 32 characters per batch");
+		check(db <= 8'h5e, "Lecture 9 character code range");
+		if (addr == 0) batch_start = $time;
+		if (addr < 32) ddram[addr] = db + 8'h20;
+		addr = addr + 1;
+		data_count = data_count + 1;
+		if (addr == 32) $display("INFO: batch of 32 chars took %0d ms", ($time - batch_start) / 1000);
 	end
-	always @(negedge en) if (! rst && rise_time > 0) begin
-		check($realtime - rise_time >= 999999, "configured E width >= 1 ms");
-		check(db === held_db && rs === held_rs, "data held through falling edge");
-		last_fall = $realtime;
-		busy_until = $realtime + 1000000;
-		if (!rs) begin
-			check(db == 8'hfc && addr == 0, "hide cursor only after homing");
-			command_count = command_count + 1;
-		end
-		else begin
-			check(reset_count > 0 && addr < 32, "write follows reset and stays within two rows");
-			check(db <= 8'h5e, "Lecture 9 character code");
-			if (addr < 32)
-				ddram[addr] = db + 8'h20;
-			addr = addr + 1;
-			data_count = data_count + 1;
-		end
-	end
-	always @(posedge lcd_rst) reset_rise = $realtime;
 	always @(negedge lcd_rst) if (!rst) begin
-		check(en === 0, "EN inactive during reset release");
-		check($realtime - reset_rise >= 1999999, "reset pulse >= 2 ms");
+		check(en === 0, "EN low while releasing RST");
 		addr = 0;
 		reset_count = reset_count + 1;
-		for (i = 0; i < 32; i = i + 1)
-			ddram[i] = 8'h20;
+		for (i = 0; i < 32; i = i + 1) ddram[i] = 8'h20;
 	end
+
 	initial begin
-		for (i = 0; i < 32; i = i + 1) ddram [i] = 8'hxx;
+		for (i = 0; i < 32; i = i + 1) ddram[i] = 8'hxx;
 		repeat (10) @(negedge clk);
 		rst = 0;
-		released = $realtime;
-		# 200000000;
-		check(reset_count == 1 && command_count == 1 && data_count == 32, "complete startup and first batch");
-		check_rows(line1 [255:128], line2 [255:128]);
+		#300000;
+		check(reset_count == 1 && data_count == 32, "power-up draws one full screen");
+		check_rows(line1, line2);
 		before_count = data_count;
-		# 50000000;
-		check(data_count == before_count, "unchanged rows cause no writes");
-		line1 = { "HP:7 SON:9      ", 128'b0 };
-		# 140000000;
-		check(data_count == before_count + 32, "one updated batch redraws both rows");
-		check_rows(line1 [255:128], line2 [255:128]);
-		// Changes during a batch must not corrupt its snapshot or disappear.
-		line1 = { "HP:6 SON:8      ", 128'b0 };
-		line2 = { "WARN: MINE NEAR!", 128'b0 };
-		# 30000000;
-		line1 = { "HP:5 SON:7      ", 128'b0 };
-		# 230000000;
-		check_rows(line1 [255:128], line2 [255:128]);
+		#500000;
+		check(data_count == before_count, "unchanged text causes no writes");
+		line1 = "HP:7 SON:9 T:1  ";
+		#300000;
+		check(data_count == before_count + 32 && reset_count == 2, "one change redraws once");
+		check_rows(line1, line2);
+		// Changes during a batch must not corrupt it, and the newest text must win
+		line1 = "HP:6 SON:8 T:1  ";
+		line2 = "WARN: MINE NEAR!";
+		#30000;
+		line1 = "HP:5 SON:7 T:0  ";
+		#600000;
+		check_rows(line1, line2);
 		before_count = data_count;
-		# 50000000;
-		check(data_count == before_count, "stable display stays idle after updates");
-		check(reset_count == 4 && command_count == 4, "one reset and hide command per batch");
-		if (errors == 0) $display("PASS: LCD Lecture 9 timing and frame updates at %0d Hz", TEST_CLK_FREQ);
+		#500000;
+		check(data_count == before_count, "stable after updates");
+		check(reset_count == 4, "exactly two more batches for the mid-batch change");
+		if (errors == 0) $display("PASS: LCD protocol and screen updates at %0d Hz", TEST_CLK_FREQ);
+		else $display("FAIL: %0d checks", errors);
 		$finish;
 	end
 	initial begin
-		# 850000000;
+		#5000000;
 		errors = errors + 1;
 		$display("FAIL: LCD timeout");
 		$finish;
